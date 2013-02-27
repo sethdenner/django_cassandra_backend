@@ -60,6 +60,9 @@ class DatabaseCreation(NonrelDatabaseCreation):
         keyspace = self.connection.settings_dict['NAME']
         
         opts = model._meta
+        if not opts.managed or opts.proxy:
+            return [], {}
+
         column_metadata = []
 
         # Browsing through fields to find indexed fields
