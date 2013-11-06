@@ -139,7 +139,7 @@ class CassandraQuery(NonrelQuery):
             (range_predicate.end == range_predicate.start) and
             range_predicate.start_inclusive and
             range_predicate.end_inclusive):
-            index_expression = IndexExpression(range_predicate.column, IndexOperator.EQ, unicode(range_predicate.start))
+            index_expression = IndexExpression(range_predicate.column, IndexOperator.EQ, range_predicate.start)
             index_expressions.append(index_expression)
         else:
             # NOTE: These range queries don't work with the current version of cassandra
@@ -150,11 +150,11 @@ class CassandraQuery(NonrelQuery):
             # on indexed columns (they still can be performed, just inefficiently).
             if range_predicate.start:
                 index_op = IndexOperator.GTE if range_predicate.start_inclusive else IndexOperator.GT
-                index_expression = IndexExpression(unicode(range_predicate.column), index_op, unicode(range_predicate.start))
+                index_expression = IndexExpression(unicode(range_predicate.column), index_op, range_predicate.start)
                 index_expressions.append(index_expression)
             if range_predicate.end:
                 index_op = IndexOperator.LTE if range_predicate.end_inclusive else IndexOperator.LT
-                index_expression = IndexExpression(unicode(range_predicate.column), index_op, unicode(range_predicate.end))
+                index_expression = IndexExpression(unicode(range_predicate.column), index_op, range_predicate.end)
                 index_expressions.append(index_expression)
                 
         assert(len(index_expressions) > 0)
