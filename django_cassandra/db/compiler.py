@@ -59,7 +59,7 @@ class CassandraQuery(NonrelQuery):
         self.root_predicate = None
         self.ordering_spec = None
         self.cached_results = None
-        
+
         self.indexed_columns = []
         self.field_name_to_column_name = {}
         for field in fields:
@@ -67,7 +67,7 @@ class CassandraQuery(NonrelQuery):
             if field.db_index:
                 self.indexed_columns.append(column_name)
             self.field_name_to_column_name[field.name] = column_name
-                
+
     # This is needed for debugging
     def __repr__(self):
         # TODO: add some meaningful query string for debugging
@@ -80,7 +80,7 @@ class CassandraQuery(NonrelQuery):
                 row = self._convert_column_list_to_row(element.columns, self.pk_column, element.key)
                 rows.append(row)
         return rows
-    
+
     def _convert_column_list_to_row(self, column_list, pk_column_name, pk_value):
         row = {}
         # FIXME: When we add code to allow primary keys that also are indexed,
@@ -132,30 +132,32 @@ class CassandraQuery(NonrelQuery):
                 
         return rows
     
-    def _get_rows_by_indexed_column(self, range_predicate):
-        # Construct the index expression for the range predicate
+    def _get_rows_by_indexed_column(self, range_predicates):
+        # Construct the index expression for the range predicates
         index_expressions = []
-        if ((range_predicate.start != None) and
-            (range_predicate.end == range_predicate.start) and
-            range_predicate.start_inclusive and
-            range_predicate.end_inclusive):
-            index_expression = IndexExpression(range_predicate.column, IndexOperator.EQ, range_predicate.start)
-            index_expressions.append(index_expression)
-        else:
-            # NOTE: These range queries don't work with the current version of cassandra
-            # that I'm using (0.7 beta3)
-            # It looks like there are cassandra tickets to add support for this, but it's
-            # unclear how soon it will be supported. We shouldn't hit this code for now,
-            # though, because can_evaluate_efficiently was changed to disable range queries
-            # on indexed columns (they still can be performed, just inefficiently).
-            if range_predicate.start:
-                index_op = IndexOperator.GTE if range_predicate.start_inclusive else IndexOperator.GT
-                index_expression = IndexExpression(unicode(range_predicate.column), index_op, range_predicate.start)
+
+        for range_predicate in range_predicates:
+            if ((range_predicate.start != None) and
+                (range_predicate.end == range_predicate.start) and
+                range_predicate.start_inclusive and
+                range_predicate.end_inclusive):
+                index_expression = IndexExpression(range_predicate.column, IndexOperator.EQ, range_predicate.start)
                 index_expressions.append(index_expression)
-            if range_predicate.end:
-                index_op = IndexOperator.LTE if range_predicate.end_inclusive else IndexOperator.LT
-                index_expression = IndexExpression(unicode(range_predicate.column), index_op, range_predicate.end)
-                index_expressions.append(index_expression)
+            else:
+                # NOTE: These range queries don't work with the current version of cassandra
+                # that I'm using (0.7 beta3)
+                # It looks like there are cassandra tickets to add support for this, but it's
+                # unclear how soon it will be supported. We shouldn't hit this code for now,
+                # though, because can_evaluate_efficiently was changed to disable range queries
+                # on indexed columns (they still can be performed, just inefficiently).
+                if range_predicate.start:
+                    index_op = IndexOperator.GTE if range_predicate.start_inclusive else IndexOperator.GT
+                    index_expression = IndexExpression(unicode(range_predicate.column), index_op, range_predicate.start)
+                    index_expressions.append(index_expression)
+                if range_predicate.end:
+                    index_op = IndexOperator.LTE if range_predicate.end_inclusive else IndexOperator.LT
+                    index_expression = IndexExpression(unicode(range_predicate.column), index_op, range_predicate.end)
+                    index_expressions.append(index_expression)
                 
         assert(len(index_expressions) > 0)
                
@@ -164,7 +166,7 @@ class CassandraQuery(NonrelQuery):
         column_parent = ColumnParent(column_family=self.column_family)
         index_clause = IndexClause(index_expressions, '', self.connection.max_key_count)
         slice_predicate = SlicePredicate(slice_range=SliceRange(start='', finish='', count=self.connection.max_column_count))
-        
+
         key_slice = call_cassandra_with_reconnect(db_connection,
             Cassandra.Client.get_indexed_slices,
             column_parent, index_clause, slice_predicate,
@@ -173,15 +175,40 @@ class CassandraQuery(NonrelQuery):
         
         return rows
     
-    def get_row_range(self, range_predicate):
+    def get_row_range(self, range_predicates):
         pk_column = self.query.get_meta().pk.column
-        if range_predicate.column == pk_column:
-            rows = self._get_rows_by_pk(range_predicate)
+        pk_predicate = None
+        for range_predicate in range_predicates:
+            assert(
+                range_predicate.column == pk_column or
+                range_predicate.column in self.indexed_columns
+            )
+
+            if range_predicate.column == pk_column:
+                pk_predicate = range_predicate
+
+        if pk_predicate:
+            rows = self._get_rows_by_pk(pk_predicate)
+
+            if len(range_predicates) > 1:
+                filtered_rows = []
+                for row in rows:
+                    match = True
+                    for predicate in range_predicates:
+                        if not predicate.row_matches(row):
+                            match = False
+                            break
+
+                    if match:
+                        filtered_rows.append(row)
+
+                rows = filtered_rows
+
         else:
-            assert(range_predicate.column in self.indexed_columns)
-            rows = self._get_rows_by_indexed_column(range_predicate)
+            rows = self._get_rows_by_indexed_column(range_predicates)
+
         return rows
-    
+
     def get_all_rows(self):
         # TODO: Could factor this code better
         db_connection = self.connection.db_connection
@@ -212,18 +239,12 @@ class CassandraQuery(NonrelQuery):
         if self.root_predicate == None:
             raise DatabaseError('No root query node')
         
-        try:
-            if high_mark is not None and high_mark <= low_mark:
-                return
-            
-            results = self._get_query_results()
-            if low_mark is not None or high_mark is not None:
-                results = results[low_mark:high_mark]
-        except Exception, e:
-            # FIXME: Can get rid of this exception handling code eventually,
-            # but it's useful for debugging for now.
-            #traceback.print_exc()
-            raise e
+        if high_mark is not None and high_mark <= low_mark:
+            return
+
+        results = self._get_query_results()
+        if low_mark is not None or high_mark is not None:
+            results = results[low_mark:high_mark]
         
         for entity in results:
             yield entity

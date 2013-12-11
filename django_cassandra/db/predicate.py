@@ -171,7 +171,7 @@ class RangePredicate(object):
         return self._matches_value(value)
     
     def get_matching_rows(self, query):
-        rows = query.get_row_range(self)
+        rows = query.get_row_range([self])
         return rows
     
 class OperationPredicate(object):
@@ -315,35 +315,37 @@ class CompoundPredicate(object):
     def get_matching_rows(self, query):
         pk_column = query.query.get_meta().pk.column
         #indexed_columns = query.indexed_columns
-        
+
         # In the first pass we handle the query nodes that can be processed
         # efficiently. Hopefully, in most cases, this will result in a
         # subset of the rows that is much smaller than the overall number
         # of rows so we only have to run the inefficient query predicates
         # over this smaller number of rows.
         if self.can_evaluate_efficiently(pk_column, query.indexed_columns):
+            range_predicates = []
             inefficient_predicates = []
             result = None
             for predicate in self.children:
-                if predicate.can_evaluate_efficiently(pk_column, query.indexed_columns):
-                    rows = predicate.get_matching_rows(query)
-                            
-                    if result == None:
-                        result = rows
-                    else:
-                        result = combine_rows(result, rows, self.op, pk_column)
+                if predicate.can_evaluate_efficiently(
+                    pk_column,
+                    query.indexed_columns
+                ):
+                    range_predicates.append(predicate)
+
                 else:
                     inefficient_predicates.append(predicate)
+
+            result = query.get_row_range(range_predicates)
+
         else:
             inefficient_predicates = self.children
             result = query.get_all_rows()
-        
+
         if result == None:
             result = []
-            
+
         # Now 
         if len(inefficient_predicates) > 0:
             result = [row for row in result if self.row_matches_subset(row, inefficient_predicates)]
-            
-        return result
 
+        return result
